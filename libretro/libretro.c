@@ -203,6 +203,8 @@
 #include "../src/cheats.h"
 #include "../src/display.h"
 
+#include "snes_ntsc.h"
+
 #define LR_MAP_BUTTON(id, name) S9xMapButton((id), S9xGetCommandT((name)))
 #define MAKE_BUTTON(pad, btn) (((pad)<<4)|(btn))
 
@@ -214,7 +216,7 @@
 #define RETRO_DEVICE_LIGHTGUN_JUSTIFIER    RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_LIGHTGUN, 1)
 #define RETRO_DEVICE_LIGHTGUN_JUSTIFIERS   RETRO_DEVICE_SUBCLASS(RETRO_DEVICE_LIGHTGUN, 2)
 
-#define CORE_VERSION "1.52.4"
+#define CORE_VERSION "1.52.5"
 
 static retro_log_printf_t log_cb = NULL;
 static retro_video_refresh_t video_cb = NULL;
@@ -225,6 +227,28 @@ static retro_environment_t environ_cb = NULL;
 
 extern s9xcommand_t			keymap[1024];
 
+static bool use_overscan;
+
+//static uint16* real_screen = NULL;
+static uint16* ntsc_frame = NULL;
+static bool ntsc_filter_enabled = false;
+
+static snes_ntsc_setup_t snes_ntsc_setup;
+static snes_ntsc_t* snes_ntsc = NULL;
+static int snes_ntsc_burst_phase = 0;
+static int snes_ntsc_merge_fields = 0;
+static bool update_snes_ntsc_setup = false;
+
+static void update_geometry(void)
+{
+	struct retro_game_geometry new_geom;
+
+	new_geom.base_width = ntsc_filter_enabled ? 604 : 256;
+	new_geom.base_height = use_overscan ? 239 : 224;
+	new_geom.aspect_ratio = ntsc_filter_enabled ? ((float)new_geom.base_width * 3.0 * 8.0)/((float)new_geom.base_height * 7.0 * 7.0) : ((float)new_geom.base_width * 8.0)/((float)new_geom.base_height * 7.0);
+
+	environ_cb(RETRO_ENVIRONMENT_SET_GEOMETRY, &new_geom);
+}
 
 static void check_variables(void)
 {
@@ -272,6 +296,20 @@ static void check_variables(void)
       }
    }
    
+   var.key = "snes9x_next_ntsc";
+   var.value = NULL;
+
+   // default if off
+   ntsc_filter_enabled = false;
+
+   if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE, &var) && var.value)
+   {
+	   if (strcmp(var.value, "Enabled") == 0)
+	   {
+		   ntsc_filter_enabled = true;
+	   }
+   }
+
    if (reset_sfx)
    S9xResetSuperFX();
 }
@@ -364,12 +402,11 @@ void retro_set_input_state(retro_input_state_t cb)
    input_cb = cb;
 }
 
-static bool use_overscan;
-
 void retro_set_environment(retro_environment_t cb)
 {
    static const struct retro_variable vars[] = {
       { "snes9x_next_overclock", "SuperFX Overclock; Disabled(10MHz)|40MHz|60MHz|80MHz|100MHz|Underclock(5MHz)|Underclock(8MHz)" },
+	  { "snes9x_next_ntsc", "Blargg's NTSC Filter; Disabled|Enabled" },
       { NULL, NULL },
    };
 
@@ -410,7 +447,7 @@ void retro_get_system_info(struct retro_system_info *info)
 #else
    info->library_version  = CORE_VERSION;
 #endif
-   info->library_name     = "Snes9x 2010";
+   info->library_name     = "Snes9x 2018";
    info->block_extract    = false;
 }
 
@@ -566,16 +603,22 @@ static void map_buttons (void)
 
 void retro_get_system_av_info(struct retro_system_av_info *info)
 {
-   info->geometry.base_width = 256;
-   info->geometry.base_height = use_overscan ? 239 : 224;
-   info->geometry.max_width = 512;
-   info->geometry.max_height = 512;
-   info->geometry.aspect_ratio = 4.0 / 3.0;
-   if (!Settings.PAL)
-      info->timing.fps = 21477272.0 / 357366.0;
-   else
-      info->timing.fps = 21281370.0 / 425568.0;
-   info->timing.sample_rate = 32040.5;
+	info->geometry.base_width = ntsc_filter_enabled ? 604 : 256;
+	info->geometry.base_height = use_overscan ? 239 : 224;
+	info->geometry.max_width = 604;
+	info->geometry.max_height = 512;
+	info->geometry.aspect_ratio = ntsc_filter_enabled ? ((float)info->geometry.base_width * 3.0 * 8.0)/((float)info->geometry.base_height * 7.0 * 7.0) : ((float)info->geometry.base_width * 8.0)/((float)info->geometry.base_height * 7.0);
+
+	if (!Settings.PAL)
+	{
+		info->timing.fps = 21477272.0 / 357366.0;
+	}
+	else
+	{
+		info->timing.fps = 21281370.0 / 425568.0;
+	}
+
+	info->timing.sample_rate = 32040.5;
 }
 
 static void snes_init (void)
@@ -615,14 +658,21 @@ static void snes_init (void)
 
    S9xSetSamplesAvailableCallback(S9xAudioCallback);
 
+//   GFX.Pitch = 604 * sizeof(uint16);
    GFX.Pitch = use_overscan ? 1024 : 2048; // FIXME: What is this supposed to do? Overscan has nothing to do with anything like this. If this is the Wii performance hack, it should be done differently.
 
 #if defined(_POSIX_C_SOURCE) && (_POSIX_C_SOURCE >= 200112L) && !defined(GEKKO)
    /* request 128-bit alignment here if possible */
+//   posix_memalign((void**)&real_screen, 16, GFX.Pitch * 1024);
    posix_memalign((void**)&GFX.Screen, 16, GFX.Pitch * 512 * sizeof(uint16));
+   posix_memalign((void**)&ntsc_frame, 16, 604 * 478 * sizeof(uint16));
 #else
-   GFX.Screen = (uint16*) calloc(1, GFX.Pitch * 512 * sizeof(uint16));
+//   real_screen = (uint16*)calloc(1, 604 * 2048 * sizeof(uint16));
+   GFX.Screen = (uint16*)calloc(1, GFX.Pitch * 512 * sizeof(uint16));
+   ntsc_frame = (uint16*)calloc(1, 604 * 478 * sizeof(uint16));
 #endif
+
+//   GFX.Screen = real_screen + 15 * 604;
 
    S9xGraphicsInit();
 
@@ -634,6 +684,13 @@ static void snes_init (void)
 
    /* Initialize SuperFX CPU to normal speed by default */
    Settings.SuperFXSpeedPerLine = 0.417 * 10.5e6;
+
+   snes_ntsc_setup = snes_ntsc_composite;
+   snes_ntsc_merge_fields = 0;
+   snes_ntsc_setup.merge_fields = 0;
+
+   snes_ntsc = (snes_ntsc_t*)malloc(sizeof(snes_ntsc_t));
+   snes_ntsc_init(snes_ntsc, &snes_ntsc_setup);
 }
 
 static void check_system_specs(void)
@@ -648,7 +705,7 @@ void retro_init (void)
    enum retro_pixel_format rgb565;
    bool achievements             = true;
    if (!environ_cb(RETRO_ENVIRONMENT_GET_OVERSCAN, &use_overscan))
-	   use_overscan = FALSE;
+	   use_overscan = false;
 
    if (environ_cb(RETRO_ENVIRONMENT_GET_LOG_INTERFACE, &log))
       log_cb = log.log;
@@ -678,6 +735,8 @@ void retro_deinit(void)
    S9xUnmapAllControls();
    
    free(GFX.Screen);
+   free(ntsc_frame);
+   free(snes_ntsc);
 }
 
 void retro_reset (void)
@@ -828,8 +887,18 @@ void retro_run (void)
 {
    bool updated = false;
    if (environ_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE, &updated) && updated)
-   check_variables();
+   {
+	   check_variables();
+	   update_geometry();
+   }
    
+   if (update_snes_ntsc_setup)
+   {
+	   snes_ntsc_init(snes_ntsc, &snes_ntsc_setup);
+
+	   update_snes_ntsc_setup = false;
+   }
+
    poll_cb();
    report_buttons();
    S9xMainLoop();
@@ -1053,7 +1122,6 @@ bool retro_load_game(const struct retro_game_info *game)
 
    check_variables();
 
-
    environ_cb(RETRO_ENVIRONMENT_SET_MEMORY_MAPS, &map);
 
    return TRUE;
@@ -1078,31 +1146,145 @@ unsigned retro_get_region (void)
 
 void S9xDeinitUpdate(int width, int height)
 {
-   if (height == 448 || height == 478){
+	if (height == 448 || height == 478)
+	{
+		// currently, interlaced mode is 480p@30 instead of 480i@60 so force field merging
+		// to reduce flicker
+		if (snes_ntsc_setup.merge_fields == 0)
+		{
+			snes_ntsc_setup.merge_fields = 1;
+			update_snes_ntsc_setup = true;
+		}
+
 		GFX.Pitch = 1024;	/* Pitch 2048 -> 1024 */
-   }
-   else GFX.Pitch = 2048;		/* Pitch 1024 -> 2048 */
+	}
+	else
+	{
+		// 240p progressive mode, so set merge_fields back to what it should be
+		if (snes_ntsc_setup.merge_fields != snes_ntsc_merge_fields)
+		{
+			snes_ntsc_setup.merge_fields = snes_ntsc_merge_fields;
+			update_snes_ntsc_setup = true;
+		}
 
-   
-   // TODO: Reverse case.
-   if (!use_overscan)
-   {
-      const uint16_t *frame = (const uint16_t*)GFX.Screen;
-      if (height == 239)
-      {
-         frame += 7 * 1024;
-         height = 224;
-      }
-      else if (height == 478)
-      {
-         frame += 15 * 512;
-         height = 448;
-      }
+		GFX.Pitch = 2048;		/* Pitch 1024 -> 2048 */
+	}
 
-      video_cb(frame, width, height, GFX.Pitch);
-   }
-   else
-      video_cb(GFX.Screen, width, height, GFX.Pitch);
+	uint16* frame = GFX.Screen;
+	int pitch = GFX.Pitch;
+
+	snes_ntsc_burst_phase ^= 1;
+
+	if (snes_ntsc_setup.merge_fields == 1)
+		snes_ntsc_burst_phase = 0;
+
+	if (use_overscan)
+	{
+		// ntsc filter then pad
+		if (ntsc_filter_enabled)
+		{
+			memset(ntsc_frame, 0, 604 * 478 * sizeof(uint16));
+
+			uint16* frame2 = ntsc_frame;
+			if (height == 224)
+			{
+				frame2 += 7 * 604;
+			}
+			else if (height == 448)
+			{
+				frame2 += 15 * 604;
+			}
+
+			if (width == 256)
+			{
+				snes_ntsc_blit(snes_ntsc, frame, GFX.Pitch / sizeof(uint16), snes_ntsc_burst_phase, width, height, frame2, 604 * sizeof(uint16));
+			}
+			else
+			{
+				snes_ntsc_blit_hires(snes_ntsc, frame, GFX.Pitch / sizeof(uint16), snes_ntsc_burst_phase, width, height, frame2, 604 * sizeof(uint16));
+			}
+
+			frame = ntsc_frame;
+			width = 604;
+			if (height == 224)
+			{
+				height = 239;
+			}
+			else if (height == 448)
+			{
+				height = 478;
+			}
+			pitch = 604 * sizeof(uint16);
+		}
+		else
+		{
+			if (height == 224)
+			{
+				memset(ntsc_frame, 0, 7 * GFX.Pitch);
+				memcpy(ntsc_frame + 7 * GFX.Pitch/sizeof(uint16), frame, 224 * GFX.Pitch);
+				memset(ntsc_frame + 231 * GFX.Pitch/sizeof(uint16), 0, 8 * GFX.Pitch);
+
+				frame = ntsc_frame;
+				height = 239;
+			}
+			else if (height == 448)
+			{
+				memset(ntsc_frame, 0, 15 * GFX.Pitch);
+				memcpy(ntsc_frame + 15 * GFX.Pitch/sizeof(uint16), frame, 448 * GFX.Pitch);
+				memset(ntsc_frame + 463 * GFX.Pitch/sizeof(uint16), 0, 15 * GFX.Pitch);
+
+				frame = ntsc_frame;
+				height = 478;
+			}
+		}
+	}
+	else
+	{
+		// crop first then ntsc filter
+		if (ntsc_filter_enabled)
+		{
+			memset(ntsc_frame, 0, 604 * 478 * sizeof(uint16));
+
+			if (height == 239)
+			{
+				frame += 7 * 1024;
+				height = 224;
+			}
+			else if (height == 478)
+			{
+				frame += 15 * 512;
+				height = 448;
+			}
+
+			if (width == 256)
+			{
+				snes_ntsc_blit(snes_ntsc, frame, GFX.Pitch / sizeof(uint16), snes_ntsc_burst_phase, width, height, ntsc_frame, 604 * sizeof(uint16));
+			}
+			else
+			{
+				snes_ntsc_blit_hires(snes_ntsc, frame, GFX.Pitch / sizeof(uint16), snes_ntsc_burst_phase, width, height, ntsc_frame, 604 * sizeof(uint16));
+			}
+
+			frame = ntsc_frame;
+			width = 604;
+			pitch = 604 * sizeof(uint16);
+		}
+		else
+		{
+			if (height == 239)
+			{
+				frame += 7 * 1024;
+				height = 224;
+			}
+			else if (height == 478)
+			{
+				frame += 15 * 512;
+				height = 448;
+			}
+		}
+	}
+
+	video_cb(frame, width, height, pitch);
 }
 
 /* Dummy functions that should probably be implemented correctly later. */

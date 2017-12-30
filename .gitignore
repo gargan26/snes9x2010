@@ -1,5 +1,9 @@
 *.bc
 *.js
 *.o
+*.dll
 package.json
 .npmignore
+.cproject
+.project
+.settings

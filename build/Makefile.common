@@ -12,7 +12,7 @@ ifeq ($(LAGFIX),1)
 endif
 
 ifeq ($(HAVE_GRIFFIN), 1)
-SOURCES_C := $(CORE_DIR)/src/snes9x_griffin.c $(CORE_DIR)/src/sa1.c
+SOURCES_C := $(CORE_DIR)/src/snes9x_griffin.c $(CORE_DIR)/src/sa1.c $(CORE_DIR)/src/snes_ntsc.c
 else
 SOURCES_C := $(CORE_DIR)/src/apu.c \
 	$(CORE_DIR)/src/bsx.c \
@@ -35,7 +35,8 @@ SOURCES_C := $(CORE_DIR)/src/apu.c \
 	$(CORE_DIR)/src/srtc.c \
 	$(CORE_DIR)/src/tile.c \
 	$(CORE_DIR)/src/hwregisters.c \
-	$(CORE_DIR)/libretro/libretro.c
+	$(CORE_DIR)/libretro/libretro.c \
+	$(CORE_DIR)/src/snes_ntsc.c
 
 ifeq ($(STATIC_LINKING),1)
 else
