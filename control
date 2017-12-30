@@ -1,10 +1,10 @@
-Package: com.libretro.snes9x2010
-Name: snes9x2010
+Package: com.libretro.snes9x2018
+Name: snes9x2018
 Depends: 
-Version: 0.0.1
-Architecture: iphoneos-arm
-Description: Libretro iOS core of Snes9x 2010
-Maintainer: libretro
-Author: libretro
+Version: 1.52.5
+Architecture: RPi3
+Description: Libretro core of Snes9x 2018
+Maintainer: gargan26
+Author: gargan26
 Section: System
 Tag: role::developer
