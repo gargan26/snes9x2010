@@ -397,6 +397,9 @@ endif
 
 include $(BUILD_DIR)/Makefile.common
 
+DEPDIR  := .deps
+DEPFLAGS = -MT $@ -MMD -MP -MF $(DEPDIR)/$*.Td
+
 OBJECTS := $(SOURCES_C:.c=.o)
 
 DEFINES = $(COREDEFINES) 
@@ -435,16 +438,29 @@ else
 	$(CC) $(fpic) $(SHARED) $(INCFLAGS) $(LDFLAGS) $(OBJOUT)$@ $(OBJECTS) $(LIBM)
 endif
 
+# Holy moly this is such a hack
+.SECONDEXPANSION:
+%.o: OBJNAME=$(basename $@)
 %.o: %.c
-	$(CC) $(INCFLAGS) $(CFLAGS) -c $(OBJOUT)$@ $<
+%.o: %.c $$(DEPDIR)/$$(OBJNAME).d
+	@mkdir -p $(dir $(DEPDIR)/$*.Td) >/dev/null
+	$(CC) $(DEPFLAGS) $(INCFLAGS) $(CFLAGS) -c $(OBJOUT)$@ $<
+	@mv -f $(DEPDIR)/$*.Td $(DEPDIR)/$*.d && touch $@
+
+$(DEPDIR)/%.d: ;
+.PRECIOUS: $(DEPDIR)/%.d
 
 clean-objs:
+	rm -rf $(DEPDIR)
 	rm -rf $(OBJECTS)
 
 clean:
+	rm -rf $(DEPDIR)
 	rm -f $(OBJECTS) $(TARGET)
 
 .PHONY: clean
+
+include $(wildcard $(patsubst %,$(DEPDIR)/%.d,$(basename $(SOURCES_C))))
 endif
 
 endif
